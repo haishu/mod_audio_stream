@@ -79,6 +79,7 @@ public:
     void markCleanedUp() {
         m_cleanedUp.store(true, std::memory_order_release);
         client.setMessageCallback({});
+        client.setBinaryCallback({});
         client.setOpenCallback({});
         client.setErrorCallback({});
         client.setCloseCallback({});
@@ -169,6 +170,13 @@ private:
             if (!self) return;
             if (self->isCleanedUp()) return;
             self->eventCallback(MESSAGE, message.c_str());
+        });
+
+        client.setBinaryCallback([wp](const void* data, size_t len) {
+            auto self = wp.lock();
+            if (!self) return;
+            if (self->isCleanedUp()) return;
+            self->binaryCallback(data, len);
         });
 
         client.setOpenCallback([wp]() {
@@ -321,6 +329,22 @@ private:
         }
 
         switch_mutex_unlock(tech_pvt->write_mutex);
+    }
+
+    void binaryCallback(const void* data, size_t len) {
+        if (isCleanedUp() || data == nullptr || len == 0) return;
+
+        switch_core_session_t* psession = switch_core_session_locate(m_sessionId.c_str());
+        if (!psession) {
+            return;
+        }
+
+        std::vector<uint8_t> rawAudio(
+            static_cast<const uint8_t*>(data),
+            static_cast<const uint8_t*>(data) + len
+        );
+        injectRawAudio(psession, rawAudio, 0);
+        switch_core_session_rwunlock(psession);
     }
 
     void eventCallback(notifyEvent_t event, const char* message) {
