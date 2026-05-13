@@ -869,7 +869,7 @@ extern "C" {
                                         char* metadata,
                                         void **ppUserData)
     {
-        int deflate, heart_beat;
+        int deflate = 0, heart_beat = 0;
         bool suppressLog = false;
         bool no_reconnect = false;
         const char* buffer_size;
