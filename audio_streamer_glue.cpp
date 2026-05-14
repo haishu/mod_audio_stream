@@ -13,6 +13,12 @@
 #include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
+#define MAX_STREAM_BUFFER_SIZE_MS 500
+
+static inline void add_drop_stats(uint64_t *packets, uint64_t *bytes, size_t byte_count) {
+    __sync_fetch_and_add(packets, 1);
+    __sync_fetch_and_add(bytes, (uint64_t)byte_count);
+}
 
 class AudioStreamer {
 public:
@@ -306,6 +312,7 @@ private:
         const size_t bytes_out = (size_t)out_len * (size_t)channels * sizeof(spx_int16_t);
 
         if (switch_mutex_lock(tech_pvt->write_mutex) != SWITCH_STATUS_SUCCESS) {
+            add_drop_stats(&tech_pvt->downstream_dropped_packets, &tech_pvt->downstream_dropped_bytes, bytes_out);
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                               "%s injectRawAudio: write mutex lock failed, dropping %zu bytes\n",
                               tech_pvt->sessionId, bytes_out);
@@ -319,7 +326,10 @@ private:
             if (free_space == 0) {
                 switch_mutex_unlock(tech_pvt->write_mutex);
                 switch_yield(10000);
-                if (switch_mutex_lock(tech_pvt->write_mutex) != SWITCH_STATUS_SUCCESS) return;
+                if (switch_mutex_lock(tech_pvt->write_mutex) != SWITCH_STATUS_SUCCESS) {
+                    add_drop_stats(&tech_pvt->downstream_dropped_packets, &tech_pvt->downstream_dropped_bytes, remaining);
+                    return;
+                }
                 continue;
             }
             size_t chunk = std::min<size_t>(remaining, free_space);
@@ -916,6 +926,10 @@ extern "C" {
             if(bSize % 20 != 0) {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s: Buffer size of %s is not a multiple of 20ms. Using default 20ms.\n",
                                   switch_channel_get_name(channel), buffer_size);
+            } else if (bSize > MAX_STREAM_BUFFER_SIZE_MS) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s: Buffer size of %sms exceeds maximum %dms. Using %dms.\n",
+                                  switch_channel_get_name(channel), buffer_size, MAX_STREAM_BUFFER_SIZE_MS, MAX_STREAM_BUFFER_SIZE_MS);
+                rtp_packets = MAX_STREAM_BUFFER_SIZE_MS/20;
             } else if(bSize >= 20){
                 rtp_packets = bSize/20;
             }
@@ -1002,6 +1016,8 @@ extern "C" {
                 
                 if (freespace >= frame.datalen) {
                     switch_buffer_write(tech_pvt->read_sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                } else {
+                    add_drop_stats(&tech_pvt->upstream_dropped_packets, &tech_pvt->upstream_dropped_bytes, frame.datalen);
                 }
 
                 if (switch_buffer_freespace(tech_pvt->read_sbuffer) == 0) {
@@ -1073,6 +1089,8 @@ extern "C" {
 
                     if (bytes_written <= switch_buffer_freespace(tech_pvt->read_sbuffer)) {
                         switch_buffer_write(tech_pvt->read_sbuffer, (const uint8_t *)out.data(), bytes_written);
+                    } else {
+                        add_drop_stats(&tech_pvt->upstream_dropped_packets, &tech_pvt->upstream_dropped_bytes, bytes_written);
                     }
                 }
 
@@ -1164,6 +1182,16 @@ extern "C" {
                                       "(%s) stream_session_cleanup: failed to join write thread (%d)\n",
                                       sessionId, join_result);
                 }
+            }
+
+            if (tech_pvt->upstream_dropped_packets || tech_pvt->downstream_dropped_packets) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) stream stats: upstream_dropped_packets=%llu upstream_dropped_bytes=%llu downstream_dropped_packets=%llu downstream_dropped_bytes=%llu\n",
+                                  sessionId,
+                                  (unsigned long long)tech_pvt->upstream_dropped_packets,
+                                  (unsigned long long)tech_pvt->upstream_dropped_bytes,
+                                  (unsigned long long)tech_pvt->downstream_dropped_packets,
+                                  (unsigned long long)tech_pvt->downstream_dropped_bytes);
             }
 
             destroy_tech_pvt(tech_pvt);

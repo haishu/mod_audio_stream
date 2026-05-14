@@ -38,6 +38,10 @@ struct private_data
     switch_mutex_t *write_mutex;
     switch_thread_t *write_thread;
     int rtp_packets;
+    uint64_t upstream_dropped_packets;
+    uint64_t upstream_dropped_bytes;
+    uint64_t downstream_dropped_packets;
+    uint64_t downstream_dropped_bytes;
 };
 
 typedef struct private_data private_t;
